@@ -6,10 +6,7 @@
 #include <cstdint>
 #include <random>
 #include <vector>
-
-static bool is_aligned(void* p, std::size_t align) {
-    return (reinterpret_cast<std::uintptr_t>(p) % align) == 0;
-}
+#include <utils.hpp>
 
 TEST_CASE("BumpAllocator: basic allocaitons are aligned and non-overlapping", "[bump]") {
     alignas(16) std::byte buffer[1024];
