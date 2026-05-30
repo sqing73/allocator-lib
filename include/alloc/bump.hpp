@@ -13,7 +13,7 @@ namespace alloc
         BumpAllocator(void *buffer, std::size_t size) noexcept
             : buffer_(static_cast<std::byte *>(buffer)), size_(size), offset_(0)
         {
-            assert(buffer != nullptr || size == 0);
+            assert(buffer != nullptr && size != 0);
         }
         BumpAllocator(const BumpAllocator &) = delete;
         BumpAllocator &operator=(const BumpAllocator &) = delete;
