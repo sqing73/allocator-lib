@@ -33,7 +33,7 @@ namespace alloc
             const int idx = size_class_index(n);
             if (idx < 0)
             {
-                return ::operator new(n, std::nothrow);
+                return nullptr;
             }
             return pools_[idx].alloc();
         }
