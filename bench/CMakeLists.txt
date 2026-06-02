@@ -1,5 +1,5 @@
-add_executable(bench_bump bench_bump.cpp)
-target_link_libraries(bench_bump PRIVATE
+add_executable(bench_allocators bench_allocators.cpp)
+target_link_libraries(bench_allocators PRIVATE
     alloc::alloc
     benchmark::benchmark
 )
