@@ -1,4 +1,4 @@
-add_executable(test_bump 
+add_executable(test_bump
     test_bump.cpp
     utils.hpp
 )
@@ -24,3 +24,11 @@ target_link_libraries(test_slab PRIVATE
 )
 add_test(NAME test_slab COMMAND test_slab)
 target_include_directories(test_slab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_vector test_vector.cpp)
+target_link_libraries(test_vector PRIVATE
+    alloc::alloc
+    Catch2::Catch2WithMain
+)
+add_test(NAME test_vector COMMAND test_vector)
+target_include_directories(test_vector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
