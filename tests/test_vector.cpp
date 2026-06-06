@@ -3,6 +3,7 @@
 
 #include <string>
 #include <stdexcept>
+#include <type_traits>
 
 struct TrackedStats
 {
@@ -73,6 +74,32 @@ struct ThrowOnMove
         throw std::runtime_error("move failed");
     }
     ~ThrowOnMove() = default;
+};
+
+struct ThrowOnCopy
+{
+    static inline int copies_made = 0;
+    static inline int throw_at = -1;
+
+    int value;
+
+    explicit ThrowOnCopy(int v) : value(v) {}
+
+    ThrowOnCopy(const ThrowOnCopy &o) : value(o.value)
+    {
+        if (copies_made == throw_at)
+            throw std::runtime_error("planned");
+        ++copies_made;
+    }
+
+    // Move exists but is NOT noexcept → move_if_noexcept falls back to copy
+    ThrowOnCopy(ThrowOnCopy &&o) : value(o.value) {}
+
+    static void reset(int n)
+    {
+        copies_made = 0;
+        throw_at = n;
+    }
 };
 
 TEST_CASE("Vector default constructor", "[vector]")
@@ -264,4 +291,132 @@ TEST_CASE("Vector large push_back: correct values after multiple grows", "[vecto
     REQUIRE(v.size() == N);
     for (int i = 0; i < N; ++i)
         CHECK(v[i] == i);
+}
+
+TEST_CASE("Vector copy ctor produces independent storage", "[vector]")
+{
+    alloc::Vector<int> a;
+    a.push_back(1);
+    a.push_back(2);
+    a.push_back(3);
+
+    alloc::Vector<int> b(a);
+    REQUIRE(b.size() == 3);
+    REQUIRE(b[0] == 1);
+    REQUIRE(b[1] == 2);
+    REQUIRE(b[2] == 3);
+    REQUIRE(a.data() != b.data());
+
+    b[0] = 99;
+    REQUIRE(a[0] == 1);
+}
+
+TEST_CASE("Vector move ctor is noexcept and steals storage", "[vector]")
+{
+    static_assert(std::is_nothrow_move_constructible_v<alloc::Vector<int>>);
+
+    alloc::Vector<int> a;
+    a.push_back(1);
+    a.push_back(2);
+    int *original = a.data();
+
+    alloc::Vector<int> b(std::move(a));
+    REQUIRE(b.size() == 2);
+    REQUIRE(b.data() == original);
+    REQUIRE(a.size() == 0);
+    REQUIRE(a.capacity() == 0);
+    REQUIRE(a.data() == nullptr);
+}
+
+TEST_CASE("Vector copy assignment via copy-and-swap", "[vector]")
+{
+    alloc::Vector<std::string> a;
+    a.push_back("one");
+    a.push_back("two");
+
+    alloc::Vector<std::string> b;
+    b.push_back("old");
+
+    b = a;
+    REQUIRE(b.size() == 2);
+    REQUIRE(b[0] == "one");
+    REQUIRE(b[1] == "two");
+    REQUIRE(a.size() == 2); // source unchanged
+}
+
+TEST_CASE("Vector move assignment", "[vector]")
+{
+    static_assert(std::is_nothrow_move_assignable_v<alloc::Vector<int>>);
+
+    alloc::Vector<int> a;
+    a.push_back(1);
+    a.push_back(2);
+    int *original = a.data();
+
+    alloc::Vector<int> b;
+    b.push_back(99);
+
+    b = std::move(a);
+    REQUIRE(b.size() == 2);
+    REQUIRE(b.data() == original);
+    REQUIRE(a.size() == 0);
+}
+
+TEST_CASE("Vector move-assigning to self is safe", "[vector]")
+{
+    alloc::Vector<int> a;
+    a.push_back(1);
+    a.push_back(2);
+    a = std::move(a); // valid-but-unspecified after; just no UB
+    SUCCEED();
+}
+
+TEST_CASE("Vector emplace_back constructs in place — no copies, no moves", "[vector]")
+{
+    g_stats.reset();
+    alloc::Vector<Tracked> v;
+    v.reserve(4); // avoid grow noise
+    v.emplace_back(42);
+
+    REQUIRE(g_stats.total_constructors() == 1);
+    REQUIRE(g_stats.copy_ctors == 0);
+    REQUIRE(g_stats.move_ctors == 0);
+    REQUIRE(v[0].value == 42);
+}
+
+TEST_CASE("Vector emplace_back forwards value categories", "[vector]")
+{
+    alloc::Vector<std::string> v;
+    v.reserve(2);
+
+    std::string s = "hello";
+    v.emplace_back(s); // lvalue → copy-constructs string
+    REQUIRE(s == "hello");
+
+    std::string t = "world";
+    v.emplace_back(std::move(t)); // rvalue → move-constructs string
+    REQUIRE(v[1] == "world");
+}
+
+TEST_CASE("strong exception guarantee: throwing grow leaves vector unchanged",
+          "[vector]")
+{
+    alloc::Vector<ThrowOnCopy> v;
+    v.reserve(2);
+    v.push_back(ThrowOnCopy(1)); // moves into storage (not a copy)
+    v.push_back(ThrowOnCopy(2));
+
+    auto *before = v.data();
+    auto size_before = v.size();
+    auto cap_before = v.capacity();
+
+    // Force grow. Grow copies (move isn't noexcept). Throw on the 2nd copy.
+    ThrowOnCopy::reset(/*throw_at=*/1);
+    REQUIRE_THROWS_AS(v.push_back(ThrowOnCopy(3)), std::runtime_error);
+
+    REQUIRE(v.size() == size_before);
+    REQUIRE(v.capacity() == cap_before);
+    REQUIRE(v.data() == before);
+    REQUIRE(v[0].value == 1);
+    REQUIRE(v[1].value == 2);
 }

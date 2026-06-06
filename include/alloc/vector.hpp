@@ -31,6 +31,64 @@ namespace alloc
             deallocate(data_, capacity_);
         }
 
+        Vector(const Vector &other)
+        {
+            if (other.size_ == 0)
+                return;
+            T *new_data = static_cast<T *>(::operator new(other.size_ * sizeof(T)));
+            size_type built = 0;
+            try
+            {
+                for (; built < other.size_; built++)
+                {
+                    ::new (new_data + built) T(other.data_[built]);
+                }
+            }
+            catch (...)
+            {
+                for (size_type i = built; built > 0; --i)
+                {
+                    new_data[i].~T();
+                }
+                deallocate(new_data, other.size_);
+                throw;
+            }
+            data_ = new_data;
+            size_ = other.size_;
+            capacity_ = other.size_;
+        }
+
+        Vector(Vector &&other) noexcept
+            : data_(other.data_), size_(other.size_), capacity_(other.capacity_)
+        {
+            other.data_ = nullptr;
+            other.size_ = 0;
+            other.capacity_ = 0;
+        }
+
+        Vector &operator=(const Vector &other)
+        {
+            Vector tmp(other);
+            swap(tmp);
+            return *this;
+        }
+
+        Vector &operator=(Vector &&other) noexcept
+        {
+            if (this != &other)
+            {
+                clear();
+                deallocate(data_, capacity_);
+                data_ = other.data_;
+                capacity_ = other.capacity_;
+                size_ = other.size_;
+                other.data_ = nullptr;
+                other.size_ = 0;
+                other.capacity_ = 0;
+            }
+            return *this;
+        }
+
         // -----------------------------------------------------------------------
         // Element access
         // -----------------------------------------------------------------------
@@ -92,6 +150,16 @@ namespace alloc
             ++size_;
         }
 
+        template <typename... Args>
+        T &emplace_back(Args &&... args)
+        {
+            if (size_ == capacity_)
+                reallocate(capacity_ == 0 ? 1 : capacity_ * 2);
+            pointer p = ::new (data_ + size_) T(std::forward<Args>(args)...);
+            ++size_;
+            return *p;
+        }
+
         void clear()
         {
             destroy_all();
@@ -114,7 +182,8 @@ namespace alloc
             }
         }
 
-        void deallocate(pointer p, size_type /*n*/) noexcept {
+        void deallocate(pointer p, size_type /*n*/) noexcept
+        {
             ::operator delete(p);
         }
 
@@ -152,7 +221,8 @@ namespace alloc
             catch (...)
             {
                 // Destroy already migrated
-                for (size_type i = migrated; i > 0; --i) {
+                for (size_type i = migrated; i > 0; --i)
+                {
                     new_data[i].~T();
                 }
                 deallocate(new_data, new_cap);
@@ -164,6 +234,13 @@ namespace alloc
 
             data_ = new_data;
             capacity_ = new_cap;
+        }
+
+        void swap(Vector &other) noexcept
+        {
+            std::swap(data_, other.data_);
+            std::swap(size_, other.size_);
+            std::swap(capacity_, other.capacity_);
         }
 
         T *data_;
