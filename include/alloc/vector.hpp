@@ -9,7 +9,7 @@
 
 namespace alloc
 {
-    template <typename T, typename Allocator = std::allocator<T>>
+    template <typename T, std::size_t N = 0, typename Allocator = std::allocator<T>>
     class Vector
     {
     public:
@@ -24,8 +24,22 @@ namespace alloc
         using traits = std::allocator_traits<Allocator>;
         using allocator_type = Allocator;
 
+        static constexpr std::size_t kBufBytes = (N == 0) ? 1 : N * sizeof(T);
+
         Vector() noexcept(std::is_nothrow_default_constructible_v<Allocator>)
-            : data_(nullptr), size_(0), capacity_(0) {};
+        {
+            if constexpr (N == 0)
+            {
+                data_ = nullptr;
+                capacity_ = 0;
+            }
+            else
+            {
+                data_ = inline_ptr();
+                capacity_ = N;
+            }
+            size_ = 0;
+        };
 
         explicit Vector(const Allocator &a) noexcept
             : data_(nullptr), size_(0), capacity_(0), alloc_(a) {}
@@ -33,7 +47,8 @@ namespace alloc
         ~Vector()
         {
             destroy_all();
-            deallocate(data_, capacity_);
+            if (is_heap())
+                deallocate(data_, capacity_);
         }
 
         Vector(const Vector &other)
@@ -133,7 +148,16 @@ namespace alloc
         bool empty() const noexcept { return size_ == 0; }
         size_type size() const noexcept { return size_; }
         size_type capacity() const noexcept { return capacity_; }
+
         allocator_type get_allocator() const noexcept { return alloc_; }
+
+        bool is_heap() const noexcept
+        {
+            if constexpr (N == 0)
+                return data_ != nullptr;
+            else
+                return data_ != inline_ptr();
+        }
 
         void reserve(size_type n)
         {
@@ -236,9 +260,10 @@ namespace alloc
                 deallocate(new_data, new_cap);
                 throw;
             }
-
+            const bool old_was_heap = is_heap();
             destroy_all();
-            deallocate(data_, capacity_);
+            if (old_was_heap)
+                deallocate(data_, capacity_);
 
             data_ = new_data;
             capacity_ = new_cap;
@@ -251,9 +276,13 @@ namespace alloc
             std::swap(capacity_, other.capacity_);
         }
 
+        T *inline_ptr() noexcept { return reinterpret_cast<T *>(inline_buf_); }
+        const T *inline_ptr() const noexcept { return reinterpret_cast<const T *>(inline_buf_); }
+
         T *data_;
         size_type size_;
         size_type capacity_;
         Allocator alloc_;
+        alignas(T) std::byte inline_buf_[kBufBytes];
     };
 }

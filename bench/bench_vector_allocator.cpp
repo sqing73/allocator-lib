@@ -41,7 +41,7 @@ static void BM_OurVector_Slab(benchmark::State &state)
     {
         SlabAllocator slab(kArena);
         {
-            Vector<int, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
+            Vector<int, 0, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
             for (int i = 0; i < state.range(0); ++i)
                 v.push_back(i);
             benchmark::DoNotOptimize(v.data());

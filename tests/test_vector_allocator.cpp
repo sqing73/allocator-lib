@@ -23,7 +23,7 @@ TEST_CASE("Vector works with STLSlabAllocator", "[vector][allocator]")
 {
     SlabAllocator slab(64 * 1024 * 1024);
 
-    Vector<int, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
+    Vector<int, 0, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
     for (int i = 0; i < 100; ++i)
         v.push_back(i);
     REQUIRE(v.size() == 100);
@@ -57,6 +57,6 @@ TEST_CASE("get_allocator round-trip", "[vector][allocator]")
 {
     SlabAllocator slab(1024);
 
-    Vector<int, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
+    Vector<int, 0, STLSlabAllocator<int>> v{STLSlabAllocator<int>(&slab)};
     REQUIRE(v.get_allocator().slab_ == &slab);
 }

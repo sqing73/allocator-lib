@@ -40,3 +40,11 @@ target_link_libraries(test_vector_allocator PRIVATE
 )
 add_test(NAME test_vector_allocator COMMAND test_vector_allocator)
 target_include_directories(test_vector_allocator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_vector_sbo test_vector_sbo.cpp)
+target_link_libraries(test_vector_sbo PRIVATE
+    alloc::alloc
+    Catch2::Catch2WithMain
+)
+add_test(NAME test_vector_sbo COMMAND test_vector_sbo)
+target_include_directories(test_vector_sbo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
