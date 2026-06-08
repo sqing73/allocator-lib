@@ -9,7 +9,7 @@
 
 namespace alloc
 {
-    template <typename T>
+    template <typename T, typename Allocator = std::allocator<T>>
     class Vector
     {
     public:
@@ -21,9 +21,14 @@ namespace alloc
         using const_pointer = const T *;
         using iterator = T *;
         using const_iterator = const T *;
+        using traits = std::allocator_traits<Allocator>;
+        using allocator_type = Allocator;
 
-        Vector() noexcept
-            : data_(nullptr), size_(0), capacity_(0) {}
+        Vector() noexcept(std::is_nothrow_default_constructible_v<Allocator>)
+            : data_(nullptr), size_(0), capacity_(0) {};
+
+        explicit Vector(const Allocator &a) noexcept
+            : data_(nullptr), size_(0), capacity_(0), alloc_(a) {}
 
         ~Vector()
         {
@@ -35,20 +40,20 @@ namespace alloc
         {
             if (other.size_ == 0)
                 return;
-            T *new_data = static_cast<T *>(::operator new(other.size_ * sizeof(T)));
+            T *new_data = allocate(other.size_);
             size_type built = 0;
             try
             {
                 for (; built < other.size_; built++)
                 {
-                    ::new (new_data + built) T(other.data_[built]);
+                    traits::construct(alloc_, new_data + built, other.data_[built]);
                 }
             }
             catch (...)
             {
-                for (size_type i = built; built > 0; --i)
+                for (size_type i = built; i > 0; --i)
                 {
-                    new_data[i].~T();
+                    traits::destroy(alloc_, new_data + (i - 1));
                 }
                 deallocate(new_data, other.size_);
                 throw;
@@ -128,6 +133,7 @@ namespace alloc
         bool empty() const noexcept { return size_ == 0; }
         size_type size() const noexcept { return size_; }
         size_type capacity() const noexcept { return capacity_; }
+        allocator_type get_allocator() const noexcept { return alloc_; }
 
         void reserve(size_type n)
         {
@@ -139,23 +145,25 @@ namespace alloc
         void push_back(T &val)
         {
             ensure_capacity();
-            ::new (static_cast<void *>(data_ + size_)) T(val);
+            traits::construct(alloc_, data_ + size_, val);
             ++size_;
         }
 
         void push_back(T &&val)
         {
             ensure_capacity();
-            ::new (static_cast<void *>(data_ + size_)) T(std::move(val));
+            traits::construct(alloc_, data_ + size_, std::move(val));
             ++size_;
         }
 
         template <typename... Args>
-        T &emplace_back(Args &&... args)
+        T &emplace_back(Args &&...args)
         {
             if (size_ == capacity_)
                 reallocate(capacity_ == 0 ? 1 : capacity_ * 2);
-            pointer p = ::new (data_ + size_) T(std::forward<Args>(args)...);
+            pointer p = data_ + size_;
+            traits::construct(alloc_, data_ + size_, std::forward<Args>(args)...);
+
             ++size_;
             return *p;
         }
@@ -167,24 +175,24 @@ namespace alloc
         }
 
     private:
-        static pointer allocate(size_type n)
+        pointer allocate(size_type n)
         {
             if (n == 0)
                 return nullptr;
-            return static_cast<pointer>(::operator new(n * sizeof(T)));
+            return static_cast<pointer>(traits::allocate(alloc_, n));
         }
 
         void destroy_all() noexcept
         {
             for (size_type i = size_; i > 0; i--)
             {
-                data_[i - 1].~T();
+                traits::destroy(alloc_, data_ + (i - 1));
             }
         }
 
-        void deallocate(pointer p, size_type /*n*/) noexcept
+        void deallocate(pointer p, size_type n) noexcept
         {
-            ::operator delete(p);
+            traits::deallocate(alloc_, p, n);
         }
 
         void ensure_capacity()
@@ -206,7 +214,7 @@ namespace alloc
                     // use move
                     for (; migrated < size_; ++migrated)
                     {
-                        ::new (static_cast<void *>(new_data + migrated)) T(std::move(data_[migrated]));
+                        traits::construct(alloc_, new_data + migrated, std::move(data_[migrated]));
                     }
                 }
                 else
@@ -214,7 +222,7 @@ namespace alloc
                     // use copy
                     for (; migrated < size_; ++migrated)
                     {
-                        ::new (static_cast<void *>(new_data + migrated)) T(data_[migrated]);
+                        traits::construct(alloc_, new_data + migrated, data_[migrated]);
                     }
                 }
             }
@@ -223,7 +231,7 @@ namespace alloc
                 // Destroy already migrated
                 for (size_type i = migrated; i > 0; --i)
                 {
-                    new_data[i].~T();
+                    traits::destroy(alloc_, new_data + (i - 1));
                 }
                 deallocate(new_data, new_cap);
                 throw;
@@ -246,5 +254,6 @@ namespace alloc
         T *data_;
         size_type size_;
         size_type capacity_;
+        Allocator alloc_;
     };
 }
