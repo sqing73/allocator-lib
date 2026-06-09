@@ -80,22 +80,33 @@ struct ThrowOnCopy
 {
     static inline int copies_made = 0;
     static inline int throw_at = -1;
+    static inline int live_count = 0;
 
     int value;
 
-    explicit ThrowOnCopy(int v) : value(v) {}
+    ThrowOnCopy() : value(0) { ++live_count; }
+    explicit ThrowOnCopy(int v) : value(v) { ++live_count; }
 
     ThrowOnCopy(const ThrowOnCopy &o) : value(o.value)
     {
         if (copies_made == throw_at)
             throw std::runtime_error("planned");
         ++copies_made;
+        ++live_count;
     }
 
     // Move exists but is NOT noexcept → move_if_noexcept falls back to copy
-    ThrowOnCopy(ThrowOnCopy &&o) : value(o.value) {}
+    ThrowOnCopy(ThrowOnCopy &&o) : value(o.value) { ++live_count; }
+
+    ~ThrowOnCopy() { --live_count; }
 
     static void reset(int n)
+    {
+        copies_made = 0;
+        throw_at = n;
+    }
+
+    static void throw_on_nth_copy(int n)
     {
         copies_made = 0;
         throw_at = n;
@@ -419,4 +430,368 @@ TEST_CASE("strong exception guarantee: throwing grow leaves vector unchanged",
     REQUIRE(v.data() == before);
     REQUIRE(v[0].value == 1);
     REQUIRE(v[1].value == 2);
+}
+
+TEST_CASE("move ctor: inline source -> element-wise move into dest's inline_buf_", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> a;
+    a.emplace_back();
+    a.emplace_back();
+    a.emplace_back(); // size=3, inline
+    REQUIRE(!a.is_heap());
+
+    g_stats.reset();
+    alloc::Vector<Tracked, 4> b(std::move(a));
+
+    REQUIRE(b.size() == 3);
+    REQUIRE(!b.is_heap());         // b is also inline
+    REQUIRE(b.data() != a.data()); // distinct inline buffers
+    REQUIRE(g_stats.move_ctors == 3);  // element-wise moves
+    REQUIRE(g_stats.copy_ctors == 0);
+    REQUIRE(a.size() == 0); // source emptied
+    REQUIRE(!a.is_heap());  // source still inline
+}
+
+TEST_CASE("move ctor: heap source -> pointer steal, source reset to empty inline", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> a;
+    for (int i = 0; i < 7; ++i)
+        a.emplace_back(); // size=7, on heap
+    REQUIRE(a.is_heap());
+    Tracked *a_heap_ptr = a.data();
+
+    g_stats.reset();
+    alloc::Vector<Tracked, 4> b(std::move(a));
+
+    REQUIRE(b.size() == 7);
+    REQUIRE(b.is_heap());
+    REQUIRE(b.data() == a_heap_ptr); // pointer stolen, not copied
+    REQUIRE(g_stats.move_ctors == 0);    // no element moves on steal
+    REQUIRE(g_stats.copy_ctors == 0);
+
+    REQUIRE(a.size() == 0); // source empty
+    REQUIRE(!a.is_heap());  // source reset to inline state
+}
+
+// ============================================================
+// Move assignment -- 4 cross-state cases + self
+// ============================================================
+
+TEST_CASE("move assign: inline <- inline", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    dest.emplace_back();
+    dest.emplace_back(); // size=2, inline
+    alloc::Vector<Tracked, 4> src;
+    src.emplace_back();
+    src.emplace_back();
+    src.emplace_back(); // size=3, inline
+
+    g_stats.reset();
+    dest = std::move(src);
+
+    REQUIRE(dest.size() == 3);
+    REQUIRE(!dest.is_heap());
+    REQUIRE(src.size() == 0);
+    REQUIRE(g_stats.move_ctors == 3); // 3 element-wise moves
+    // 2 dest tear-down destructs + 3 src moved-from destructs = 5
+    REQUIRE(g_stats.dtors == 5);
+}
+
+TEST_CASE("move assign: inline <- heap", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    dest.emplace_back(); // size=1, inline
+    alloc::Vector<Tracked, 4> src;
+    for (int i = 0; i < 6; ++i)
+        src.emplace_back(); // size=6, heap
+    Tracked *src_heap_ptr = src.data();
+
+    g_stats.reset();
+    dest = std::move(src);
+
+    REQUIRE(dest.size() == 6);
+    REQUIRE(dest.is_heap());
+    REQUIRE(dest.data() == src_heap_ptr); // adopted src's heap
+    REQUIRE(src.size() == 0);
+    REQUIRE(!src.is_heap());
+    REQUIRE(g_stats.move_ctors == 0);     // pointer steal, no element moves
+    REQUIRE(g_stats.dtors == 1); // only dest's 1 old element
+}
+
+TEST_CASE("move assign: heap <- inline", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    for (int i = 0; i < 6; ++i)
+        dest.emplace_back(); // size=6, heap
+    alloc::Vector<Tracked, 4> src;
+    src.emplace_back();
+    src.emplace_back(); // size=2, inline
+
+    g_stats.reset();
+    dest = std::move(src);
+
+    REQUIRE(dest.size() == 2);
+    REQUIRE(!dest.is_heap()); // re-inlined after teardown
+    REQUIRE(src.size() == 0);
+    REQUIRE(g_stats.move_ctors == 2); // element-wise moves into inline_buf_
+    // 6 dest tear-down destructs + 2 src moved-from destructs = 8
+    REQUIRE(g_stats.dtors == 8);
+}
+
+TEST_CASE("move assign: heap <- heap", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    for (int i = 0; i < 5; ++i)
+        dest.emplace_back();
+    alloc::Vector<Tracked, 4> src;
+    for (int i = 0; i < 7; ++i)
+        src.emplace_back();
+    Tracked *src_heap_ptr = src.data();
+
+    g_stats.reset();
+    dest = std::move(src);
+
+    REQUIRE(dest.size() == 7);
+    REQUIRE(dest.is_heap());
+    REQUIRE(dest.data() == src_heap_ptr); // adopted src's heap
+    REQUIRE(src.size() == 0);
+    REQUIRE(!src.is_heap());
+    REQUIRE(g_stats.move_ctors == 0);     // pointer steal
+    REQUIRE(g_stats.dtors == 5); // dest's old elements
+}
+
+TEST_CASE("move assign: self-assignment is a no-op", "[vector][sbo]")
+{
+    alloc::Vector<int, 4> v;
+    v.push_back(1);
+    v.push_back(2);
+    v.push_back(3);
+
+    alloc::Vector<int, 4> &ref = v;
+    v = std::move(ref); // alias dodges self-move warning
+
+    REQUIRE(v.size() == 3);
+    REQUIRE(v[0] == 1);
+    REQUIRE(v[1] == 2);
+    REQUIRE(v[2] == 3);
+}
+
+// ============================================================
+// Copy constructor
+// ============================================================
+
+TEST_CASE("copy ctor: inline source -> dest inline, elements copied", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> a;
+    a.emplace_back();
+    a.emplace_back();
+
+    g_stats.reset();
+    alloc::Vector<Tracked, 4> b(a);
+
+    REQUIRE(b.size() == 2);
+    REQUIRE(a.size() == 2); // source untouched
+    REQUIRE(!b.is_heap());
+    REQUIRE(b.data() != a.data()); // distinct storage
+    REQUIRE(g_stats.copy_ctors == 2);
+    REQUIRE(g_stats.move_ctors == 0);
+}
+
+TEST_CASE("copy ctor: large source -> dest heap", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> a;
+    for (int i = 0; i < 6; ++i)
+        a.emplace_back(); // heap
+
+    g_stats.reset();
+    alloc::Vector<Tracked, 4> b(a);
+
+    REQUIRE(b.size() == 6);
+    REQUIRE(b.is_heap());
+    REQUIRE(b.data() != a.data());
+    REQUIRE(g_stats.copy_ctors == 6);
+}
+
+TEST_CASE("copy ctor: throwing copy cleans up partial state, no leaks", "[vector][sbo]")
+{
+    ThrowOnCopy::reset(-1); // clear state left by earlier tests
+    alloc::Vector<ThrowOnCopy, 4> a;
+    for (int i = 0; i < 6; ++i)
+        a.emplace_back(); // a on heap, size=6
+    int alive_before = ThrowOnCopy::live_count;
+
+    ThrowOnCopy::throw_on_nth_copy(3); // 4th copy throws
+
+    REQUIRE_THROWS_AS((alloc::Vector<ThrowOnCopy, 4>(a)), std::runtime_error);
+    REQUIRE(ThrowOnCopy::live_count == alive_before); // no orphans, no leaks
+    REQUIRE(a.size() == 6);                           // source untouched
+}
+
+// ============================================================
+// Copy assignment -- 4 cross-state cases + self + throwing
+// ============================================================
+
+TEST_CASE("copy assign: inline <- inline", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    dest.emplace_back();
+    dest.emplace_back();
+    alloc::Vector<Tracked, 4> src;
+    src.emplace_back();
+    src.emplace_back();
+    src.emplace_back();
+
+    g_stats.reset();
+    dest = src;
+
+    REQUIRE(dest.size() == 3);
+    REQUIRE(src.size() == 3); // source untouched
+    REQUIRE(!dest.is_heap());
+    REQUIRE(g_stats.copy_ctors == 3);
+    REQUIRE(g_stats.dtors == 2); // dest's old 2 elements
+}
+
+TEST_CASE("copy assign: inline <- heap (large src)", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    dest.emplace_back();
+    alloc::Vector<Tracked, 4> src;
+    for (int i = 0; i < 6; ++i)
+        src.emplace_back();
+
+    g_stats.reset();
+    dest = src;
+
+    REQUIRE(dest.size() == 6);
+    REQUIRE(dest.is_heap());            // src.size > N -> heap
+    REQUIRE(src.size() == 6);           // source untouched
+    REQUIRE(dest.data() != src.data()); // independent heap allocation
+    REQUIRE(g_stats.copy_ctors == 6);
+    REQUIRE(g_stats.dtors == 1);
+}
+
+TEST_CASE("copy assign: heap <- inline (small src) re-inlines", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    for (int i = 0; i < 6; ++i)
+        dest.emplace_back(); // dest on heap
+    alloc::Vector<Tracked, 4> src;
+    src.emplace_back();
+    src.emplace_back();
+
+    g_stats.reset();
+    dest = src;
+
+    REQUIRE(dest.size() == 2);
+    REQUIRE(!dest.is_heap()); // re-inlined
+    REQUIRE(g_stats.copy_ctors == 2);
+    REQUIRE(g_stats.dtors == 6); // dest's old heap elements destroyed
+}
+
+TEST_CASE("copy assign: heap <- heap", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> dest;
+    for (int i = 0; i < 5; ++i)
+        dest.emplace_back();
+    alloc::Vector<Tracked, 4> src;
+    for (int i = 0; i < 8; ++i)
+        src.emplace_back();
+
+    g_stats.reset();
+    dest = src;
+
+    REQUIRE(dest.size() == 8);
+    REQUIRE(dest.is_heap());
+    REQUIRE(src.size() == 8);
+    REQUIRE(dest.data() != src.data());
+    REQUIRE(g_stats.copy_ctors == 8);
+    REQUIRE(g_stats.dtors == 5);
+}
+
+TEST_CASE("copy assign: self-assignment is a no-op", "[vector][sbo]")
+{
+    alloc::Vector<int, 4> v;
+    v.push_back(10);
+    v.push_back(20);
+    v.push_back(30);
+
+    alloc::Vector<int, 4> &ref = v;
+    v = ref;
+
+    REQUIRE(v.size() == 3);
+    REQUIRE(v[0] == 10);
+    REQUIRE(v[1] == 20);
+    REQUIRE(v[2] == 30);
+}
+
+TEST_CASE("copy assign: throwing copy leaves valid empty state (basic guarantee)", "[vector][sbo]")
+{
+    ThrowOnCopy::reset(-1); // clear state left by earlier tests
+    alloc::Vector<ThrowOnCopy, 4> dest;
+    for (int i = 0; i < 3; ++i)
+        dest.emplace_back(); // dest inline, size=3
+    alloc::Vector<ThrowOnCopy, 4> src;
+    for (int i = 0; i < 5; ++i)
+        src.emplace_back(); // src heap, size=5
+
+    ThrowOnCopy::throw_on_nth_copy(2); // 3rd copy throws
+
+    REQUIRE_THROWS_AS(dest = src, std::runtime_error);
+
+    // Basic guarantee fingerprint: dest's old contents are gone,
+    // dest is in a valid empty state, no leaks.
+    REQUIRE(dest.size() == 0);
+    REQUIRE(!dest.is_heap());
+    REQUIRE(src.size() == 5); // source untouched
+
+    // Only src's elements should be alive (dest's old 3 destroyed in tear-down,
+    // partial copies destroyed in rollback, no heap leak).
+    REQUIRE(ThrowOnCopy::live_count == 5);
+}
+
+// ============================================================
+// Bonus: chained operations and ASan-friendly smoke
+// ============================================================
+
+TEST_CASE("ASan smoke: chained move/copy across states does not leak or UAF", "[vector][sbo]")
+{
+    alloc::Vector<Tracked, 4> a;
+    for (int i = 0; i < 10; ++i)
+        a.emplace_back(); // heap
+
+    alloc::Vector<Tracked, 4> b = a;            // copy ctor (heap -> heap)
+    alloc::Vector<Tracked, 4> c = std::move(b); // move ctor (heap, pointer steal)
+    alloc::Vector<Tracked, 4> d;
+    d.emplace_back(); // inline
+    d = c;            // copy assign (inline <- heap)
+    d = std::move(a); // move assign (heap <- heap)
+
+    REQUIRE(d.size() == 10);
+    REQUIRE(d.is_heap());
+    // ASan/UBSan validates the rest.
+}
+
+TEST_CASE("Vector<T, 0> (no SBO) still satisfies all operations", "[vector][sbo]")
+{
+    // Degenerate case: inline_buf_ has zero capacity, everything goes through heap.
+    alloc::Vector<Tracked, 0> a;
+    for (int i = 0; i < 5; ++i)
+        a.emplace_back();
+    REQUIRE(a.is_heap());
+
+    alloc::Vector<Tracked, 0> b = a; // copy ctor
+    REQUIRE(b.size() == 5);
+    REQUIRE(b.is_heap());
+
+    alloc::Vector<Tracked, 0> c = std::move(a); // move ctor (steal)
+    REQUIRE(c.size() == 5);
+    REQUIRE(a.size() == 0);
+
+    b = c; // copy assign
+    REQUIRE(b.size() == 5);
+
+    b = std::move(c); // move assign
+    REQUIRE(b.size() == 5);
+    REQUIRE(c.size() == 0);
 }

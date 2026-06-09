@@ -52,59 +52,131 @@ namespace alloc
         }
 
         Vector(const Vector &other)
+            : data_(reinterpret_cast<T *>(inline_buf_)), size_(0), capacity_(N), alloc_(traits::select_on_container_copy_construction(other.alloc_))
         {
-            if (other.size_ == 0)
-                return;
-            T *new_data = allocate(other.size_);
-            size_type built = 0;
+            const bool need_heap = other.size_ > N;
+            if (need_heap)
+            {
+                data_ = traits::allocate(alloc_, other.size_);
+                capacity_ = other.size_;
+            }
             try
             {
-                for (; built < other.size_; built++)
+                for (size_t i = 0; i < other.size_; ++i)
                 {
-                    traits::construct(alloc_, new_data + built, other.data_[built]);
+                    new (data_ + i) T(other.data_[i]);
+                    ++size_; // increment per-iter for correct cleanup on throw
                 }
             }
             catch (...)
             {
-                for (size_type i = built; i > 0; --i)
+                for (size_t j = 0; j < size_; ++j)
                 {
-                    traits::destroy(alloc_, new_data + (i - 1));
+                    (data_ + j)->~T();
                 }
-                deallocate(new_data, other.size_);
+                if (need_heap)
+                {
+                    traits::deallocate(alloc_, data_, capacity_);
+                }
                 throw;
             }
-            data_ = new_data;
-            size_ = other.size_;
-            capacity_ = other.size_;
         }
 
         Vector(Vector &&other) noexcept
-            : data_(other.data_), size_(other.size_), capacity_(other.capacity_)
+            : size_(other.size_), capacity_(other.capacity_)
         {
-            other.data_ = nullptr;
-            other.size_ = 0;
-            other.capacity_ = 0;
+            if (other.is_heap())
+            {
+                data_ = other.data_;
+                other.reset_to_empty();
+            }
+            else if constexpr (N > 0)
+            {
+                data_ = inline_ptr();
+                for (size_t i = 0; i < other.size_; ++i)
+                    new (data_ + i) T(std::move(other.data_[i]));
+                other.size_ = 0;
+            }
+            else
+            {
+                data_ = nullptr; // N==0 and other was empty
+            }
         }
 
         Vector &operator=(const Vector &other)
         {
-            Vector tmp(other);
-            swap(tmp);
+            if (this == &other)
+                return *this;
+
+            // Phase 1: teardown current state (same as move assignment)
+            clear();
+            if (is_heap())
+            {
+                traits::deallocate(alloc_, data_, capacity_);
+                data_ = reinterpret_cast<T *>(inline_buf_);
+                capacity_ = N;
+            }
+            // *this is now valid empty inline state.
+
+            // Phase 2: acquire via copy (same as copy ctor body)
+            const bool need_heap = other.size_ > N;
+            if (need_heap)
+            {
+                data_ = traits::allocate(alloc_, other.size_);
+                capacity_ = other.size_;
+            }
+            try
+            {
+                for (size_t i = 0; i < other.size_; ++i)
+                {
+                    new (data_ + i) T(other.data_[i]);
+                    ++size_;
+                }
+            }
+            catch (...)
+            {
+                // Rollback partial construction; leave *this in valid empty inline state
+                for (size_t j = 0; j < size_; ++j)
+                {
+                    (data_ + j)->~T();
+                }
+                size_ = 0;
+                if (need_heap)
+                {
+                    traits::deallocate(alloc_, data_, capacity_);
+                    data_ = reinterpret_cast<T *>(inline_buf_);
+                    capacity_ = N;
+                }
+                throw;
+            }
+
             return *this;
         }
 
-        Vector &operator=(Vector &&other) noexcept
+        Vector &operator=(Vector &&other) noexcept(std::is_nothrow_move_constructible_v<T>)
         {
-            if (this != &other)
+            if (this == &other)
+                return *this;
+            clear();
+            if (is_heap())
+                traits::deallocate(alloc_, data_, capacity_);
+            reset_to_empty();
+
+            if (other.is_heap())
             {
-                clear();
-                deallocate(data_, capacity_);
                 data_ = other.data_;
-                capacity_ = other.capacity_;
                 size_ = other.size_;
-                other.data_ = nullptr;
-                other.size_ = 0;
-                other.capacity_ = 0;
+                capacity_ = other.capacity_;
+                other.reset_to_empty();
+            }
+            else
+            {
+                for (size_t i = 0; i < other.size_; ++i)
+                {
+                    new (data_ + i) T(std::move(other.data_[i]));
+                }
+                size_ = other.size_;
+                other.clear();
             }
             return *this;
         }
@@ -206,6 +278,22 @@ namespace alloc
             return static_cast<pointer>(traits::allocate(alloc_, n));
         }
 
+        // Reset this vector to a valid empty state without touching its elements.
+        void reset_to_empty() noexcept
+        {
+            size_ = 0;
+            if constexpr (N == 0)
+            {
+                data_ = nullptr;
+                capacity_ = 0;
+            }
+            else
+            {
+                data_ = inline_ptr();
+                capacity_ = N;
+            }
+        }
+
         void destroy_all() noexcept
         {
             for (size_type i = size_; i > 0; i--)
@@ -267,13 +355,6 @@ namespace alloc
 
             data_ = new_data;
             capacity_ = new_cap;
-        }
-
-        void swap(Vector &other) noexcept
-        {
-            std::swap(data_, other.data_);
-            std::swap(size_, other.size_);
-            std::swap(capacity_, other.capacity_);
         }
 
         T *inline_ptr() noexcept { return reinterpret_cast<T *>(inline_buf_); }

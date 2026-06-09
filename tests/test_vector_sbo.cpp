@@ -1,7 +1,7 @@
 #include <alloc/vector.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-TEST_CASE("SBO: small vector stays inline", "[vector][allocator]")
+TEST_CASE("SBO: small vector stays inline", "[vector][sbo]")
 {
     alloc::Vector<int, 4> v;
     v.push_back(1);
@@ -17,7 +17,7 @@ TEST_CASE("SBO: small vector stays inline", "[vector][allocator]")
     REQUIRE(dp < obj_hi);
 }
 
-TEST_CASE("SBO: crossing the boundary spills to heap", "[vector][allocator]")
+TEST_CASE("SBO: crossing the boundary spills to heap", "[vector][sbo]")
 {
     alloc::Vector<int, 4> v;
     for (int i = 0; i < 5; ++i)
@@ -28,7 +28,7 @@ TEST_CASE("SBO: crossing the boundary spills to heap", "[vector][allocator]")
         REQUIRE(v[i] == i);
 }
 
-TEST_CASE("SBO: N == 0 behaves like the pre-SBO Vector", "[vector][allocator]")
+TEST_CASE("SBO: N == 0 behaves like the pre-SBO Vector", "[vector][sbo]")
 {
     alloc::Vector<int, 0> v;
     REQUIRE_FALSE(v.is_heap()); // nullptr => no storage yet
